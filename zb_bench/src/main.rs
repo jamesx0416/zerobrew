@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -163,9 +163,10 @@ fn create_installer(
     fs::create_dir_all(root.join("db")).unwrap();
 
     let api_client = ApiClient::with_base_url(api_base_url.to_string());
-    let blob_cache = BlobCache::new(&root.join("cache")).map_err(|e| zb_core::Error::StoreCorruption {
-        message: format!("failed to create blob cache: {e}"),
-    })?;
+    let blob_cache =
+        BlobCache::new(&root.join("cache")).map_err(|e| zb_core::Error::StoreCorruption {
+            message: format!("failed to create blob cache: {e}"),
+        })?;
     let store = Store::new(root).map_err(|e| zb_core::Error::StoreCorruption {
         message: format!("failed to create store: {e}"),
     })?;
@@ -268,7 +269,12 @@ async fn run_real_bench(formula: &str) -> Result<BenchResult, Box<dyn std::error
 
     // Clean zerobrew caches for cold test
     let _ = Command::new("rm")
-        .args(["-rf", "/opt/zerobrew/db", "/opt/zerobrew/cache", "/opt/zerobrew/store"])
+        .args([
+            "-rf",
+            "/opt/zerobrew/db",
+            "/opt/zerobrew/cache",
+            "/opt/zerobrew/store",
+        ])
         .output();
 
     // Run Homebrew install (cold)
@@ -333,8 +339,14 @@ async fn run_real_bench(formula: &str) -> Result<BenchResult, Box<dyn std::error
     println!("\n=== Results ===");
     println!("Formula: {}", formula);
     println!("Homebrew cold:  {} ms", brew_cold_ms);
-    println!("Zerobrew cold:  {} ms ({:.1}x faster)", zb_cold_ms, cold_speedup);
-    println!("Zerobrew warm:  {} ms ({:.1}x faster)", zb_warm_ms, warm_speedup);
+    println!(
+        "Zerobrew cold:  {} ms ({:.1}x faster)",
+        zb_cold_ms, cold_speedup
+    );
+    println!(
+        "Zerobrew warm:  {} ms ({:.1}x faster)",
+        zb_warm_ms, warm_speedup
+    );
 
     Ok(BenchResult {
         name: formula.to_string(),
@@ -347,46 +359,155 @@ async fn run_real_bench(formula: &str) -> Result<BenchResult, Box<dyn std::error
 
 // Abridged list for quick testing (fast packages with few deps)
 const POPULAR_PACKAGES_ABRIDGED: &[&str] = &[
-    "jq", "tree", "htop", "bat", "fd", "ripgrep", "fzf",
-    "wget", "curl", "git", "tmux", "zoxide",
-    "openssl@3", "sqlite", "readline", "pcre2", "zstd", "lz4",
-    "node", "go", "ruby", "gh",
+    "jq",
+    "tree",
+    "htop",
+    "bat",
+    "fd",
+    "ripgrep",
+    "fzf",
+    "wget",
+    "curl",
+    "git",
+    "tmux",
+    "zoxide",
+    "openssl@3",
+    "sqlite",
+    "readline",
+    "pcre2",
+    "zstd",
+    "lz4",
+    "node",
+    "go",
+    "ruby",
+    "gh",
 ];
 
 // Top 100 Homebrew packages from analytics (30d install count)
 // Fetched from: https://formulae.brew.sh/api/analytics/install/30d.json
 const POPULAR_PACKAGES: &[&str] = &[
-    "ca-certificates", "openssl@3", "xz", "sqlite", "readline",
-    "icu4c@78", "python@3.14", "awscli", "node", "harfbuzz",
-    "ncurses", "gh", "pcre2", "libpng", "zstd",
-    "glib", "lz4", "gettext", "libngtcp2", "libnghttp3",
-    "pkgconf", "libunistring", "mpdecimal", "brotli", "jpeg-turbo",
-    "xorgproto", "ffmpeg", "cmake", "libnghttp2", "go",
-    "uv", "gmp", "libtiff", "fontconfig", "python@3.13",
-    "git", "little-cms2", "dav1d", "openexr", "c-ares",
-    "tesseract", "p11-kit", "imagemagick", "zlib", "libx11",
-    "freetype", "protobuf", "gnupg", "openjph", "libtasn1",
-    "ruby", "gnutls", "expat", "libsodium", "simdjson",
-    "gemini-cli", "libarchive", "pyenv", "pixman", "curl",
-    "opus", "unbound", "cairo", "pango", "leptonica",
-    "libxcb", "jpeg-xl", "coreutils", "certifi", "krb5",
-    "docker", "libheif", "webp", "libxext", "libxau",
-    "gcc", "bzip2", "libxdmcp", "abseil", "xcbeautify",
-    "libuv", "giflib", "utf8proc", "libxrender", "m4",
-    "graphite2", "openjdk", "uvwasi", "libffi", "libdeflate",
-    "llvm", "aom", "lzo", "libevent", "libgpg-error",
-    "libidn2", "berkeley-db@5", "deno", "libedit", "oniguruma",
+    "ca-certificates",
+    "openssl@3",
+    "xz",
+    "sqlite",
+    "readline",
+    "icu4c@78",
+    "python@3.14",
+    "awscli",
+    "node",
+    "harfbuzz",
+    "ncurses",
+    "gh",
+    "pcre2",
+    "libpng",
+    "zstd",
+    "glib",
+    "lz4",
+    "gettext",
+    "libngtcp2",
+    "libnghttp3",
+    "pkgconf",
+    "libunistring",
+    "mpdecimal",
+    "brotli",
+    "jpeg-turbo",
+    "xorgproto",
+    "ffmpeg",
+    "cmake",
+    "libnghttp2",
+    "go",
+    "uv",
+    "gmp",
+    "libtiff",
+    "fontconfig",
+    "python@3.13",
+    "git",
+    "little-cms2",
+    "dav1d",
+    "openexr",
+    "c-ares",
+    "tesseract",
+    "p11-kit",
+    "imagemagick",
+    "zlib",
+    "libx11",
+    "freetype",
+    "protobuf",
+    "gnupg",
+    "openjph",
+    "libtasn1",
+    "ruby",
+    "gnutls",
+    "expat",
+    "libsodium",
+    "simdjson",
+    "gemini-cli",
+    "libarchive",
+    "pyenv",
+    "pixman",
+    "curl",
+    "opus",
+    "unbound",
+    "cairo",
+    "pango",
+    "leptonica",
+    "libxcb",
+    "jpeg-xl",
+    "coreutils",
+    "certifi",
+    "krb5",
+    "docker",
+    "libheif",
+    "webp",
+    "libxext",
+    "libxau",
+    "gcc",
+    "bzip2",
+    "libxdmcp",
+    "abseil",
+    "xcbeautify",
+    "libuv",
+    "giflib",
+    "utf8proc",
+    "libxrender",
+    "m4",
+    "graphite2",
+    "openjdk",
+    "uvwasi",
+    "libffi",
+    "libdeflate",
+    "llvm",
+    "aom",
+    "lzo",
+    "libevent",
+    "libgpg-error",
+    "libidn2",
+    "berkeley-db@5",
+    "deno",
+    "libedit",
+    "oniguruma",
 ];
 
-async fn run_suite_bench(count: usize, quick: bool, json_output: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_suite_bench(
+    count: usize,
+    quick: bool,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::process::Command;
 
     let source = if quick { "abridged" } else { "top 100" };
     if !json_output {
-        println!("Running benchmark suite ({} packages from {} list)...\n", count, source);
+        println!(
+            "Running benchmark suite ({} packages from {} list)...\n",
+            count, source
+        );
     }
 
-    let package_list = if quick { POPULAR_PACKAGES_ABRIDGED } else { POPULAR_PACKAGES };
+    let package_list = if quick {
+        POPULAR_PACKAGES_ABRIDGED
+    } else {
+        POPULAR_PACKAGES
+    };
     let packages: Vec<&str> = package_list.iter().take(count).copied().collect();
     let mut results: Vec<BenchResult> = Vec::new();
     let mut failures: Vec<(String, String)> = Vec::new();
@@ -449,17 +570,25 @@ async fn run_suite_bench(count: usize, quick: bool, json_output: bool) -> Result
             avg_warm_speedup: f64,
         }
 
-        let avg_speedup = if results.is_empty() { 0.0 } else {
+        let avg_speedup = if results.is_empty() {
+            0.0
+        } else {
             results.iter().map(|r| r.cold_speedup).sum::<f64>() / results.len() as f64
         };
-        let avg_warm_speedup = if results.is_empty() { 0.0 } else {
-            results.iter().map(|r| {
-                if r.zerobrew_warm_ms > 0 {
-                    r.zerobrew_cold_ms as f64 / r.zerobrew_warm_ms as f64
-                } else {
-                    1.0
-                }
-            }).sum::<f64>() / results.len() as f64
+        let avg_warm_speedup = if results.is_empty() {
+            0.0
+        } else {
+            results
+                .iter()
+                .map(|r| {
+                    if r.zerobrew_warm_ms > 0 {
+                        r.zerobrew_cold_ms as f64 / r.zerobrew_warm_ms as f64
+                    } else {
+                        1.0
+                    }
+                })
+                .sum::<f64>()
+                / results.len() as f64
         };
 
         let output = SuiteOutput {
@@ -482,14 +611,19 @@ async fn run_suite_bench(count: usize, quick: bool, json_output: bool) -> Result
         println!("Failed: {}", failures.len());
 
         if !results.is_empty() {
-            let avg_speedup: f64 = results.iter().map(|r| r.cold_speedup).sum::<f64>() / results.len() as f64;
-            let avg_warm_speedup: f64 = results.iter().map(|r| {
-                if r.zerobrew_warm_ms > 0 {
-                    r.zerobrew_cold_ms as f64 / r.zerobrew_warm_ms as f64
-                } else {
-                    1.0
-                }
-            }).sum::<f64>() / results.len() as f64;
+            let avg_speedup: f64 =
+                results.iter().map(|r| r.cold_speedup).sum::<f64>() / results.len() as f64;
+            let avg_warm_speedup: f64 = results
+                .iter()
+                .map(|r| {
+                    if r.zerobrew_warm_ms > 0 {
+                        r.zerobrew_cold_ms as f64 / r.zerobrew_warm_ms as f64
+                    } else {
+                        1.0
+                    }
+                })
+                .sum::<f64>()
+                / results.len() as f64;
 
             println!("\nPerformance:");
             println!("  Avg cold speedup vs Homebrew: {:.1}x", avg_speedup);
@@ -546,18 +680,16 @@ async fn main() {
                 }
             }
         }
-        Commands::Real { formula } => {
-            match run_real_bench(&formula).await {
-                Ok(result) => {
-                    let json = serde_json::to_string_pretty(&result).unwrap();
-                    println!("\n{}", json);
-                }
-                Err(e) => {
-                    eprintln!("Benchmark failed: {}", e);
-                    std::process::exit(1);
-                }
+        Commands::Real { formula } => match run_real_bench(&formula).await {
+            Ok(result) => {
+                let json = serde_json::to_string_pretty(&result).unwrap();
+                println!("\n{}", json);
             }
-        }
+            Err(e) => {
+                eprintln!("Benchmark failed: {}", e);
+                std::process::exit(1);
+            }
+        },
         Commands::Suite { count, quick, json } => {
             if let Err(e) = run_suite_bench(count, quick, json).await {
                 eprintln!("Suite benchmark failed: {}", e);

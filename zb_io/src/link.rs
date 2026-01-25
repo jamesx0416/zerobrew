@@ -56,7 +56,10 @@ impl Linker {
                 if let Ok(existing_target) = fs::read_link(&link_path) {
                     // Resolve relative symlinks by joining with the link's parent directory
                     let resolved_existing = if existing_target.is_relative() {
-                        link_path.parent().unwrap_or(Path::new("")).join(&existing_target)
+                        link_path
+                            .parent()
+                            .unwrap_or(Path::new(""))
+                            .join(&existing_target)
                     } else {
                         existing_target
                     };
@@ -139,7 +142,10 @@ impl Linker {
             if let Ok(existing_target) = fs::read_link(&link_path) {
                 // Resolve relative symlinks by joining with the link's parent directory
                 let resolved_existing = if existing_target.is_relative() {
-                    link_path.parent().unwrap_or(Path::new("")).join(&existing_target)
+                    link_path
+                        .parent()
+                        .unwrap_or(Path::new(""))
+                        .join(&existing_target)
                 } else {
                     existing_target
                 };
@@ -246,7 +252,10 @@ impl Linker {
                 if let Ok(existing_target) = fs::read_link(&link_path) {
                     // Resolve relative symlinks by joining with the link's parent directory
                     let resolved_existing = if existing_target.is_relative() {
-                        link_path.parent().unwrap_or(Path::new("")).join(&existing_target)
+                        link_path
+                            .parent()
+                            .unwrap_or(Path::new(""))
+                            .join(&existing_target)
                     } else {
                         existing_target
                     };

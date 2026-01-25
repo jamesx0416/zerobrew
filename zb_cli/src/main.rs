@@ -23,7 +23,7 @@ struct Cli {
     prefix: PathBuf,
 
     /// Number of parallel downloads
-    #[arg(long, default_value = "8")]
+    #[arg(long, default_value = "48")]
     concurrency: usize,
 
     /// Homebrew Cellar path to reuse existing packages (set to empty to disable)
@@ -63,6 +63,13 @@ enum Commands {
 
     /// Garbage collect unreferenced store entries
     Gc,
+
+    /// Reset zerobrew (delete all data for cold install testing)
+    Reset {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -84,7 +91,10 @@ fn suggest_homebrew(formula: &str, error: &zb_core::Error) {
     eprintln!("      Error: {}", error);
     eprintln!();
     eprintln!("      Try installing with Homebrew instead:");
-    eprintln!("      {}", style(format!("brew install {}", formula)).cyan());
+    eprintln!(
+        "      {}",
+        style(format!("brew install {}", formula)).cyan()
+    );
     eprintln!();
 }
 
@@ -132,10 +142,13 @@ async fn run(cli: Cli) -> Result<(), zb_core::Error> {
 
             // Set up progress display
             let multi = MultiProgress::new();
-            let bars: Arc<Mutex<HashMap<String, ProgressBar>>> = Arc::new(Mutex::new(HashMap::new()));
+            let bars: Arc<Mutex<HashMap<String, ProgressBar>>> =
+                Arc::new(Mutex::new(HashMap::new()));
 
             let download_style = ProgressStyle::default_bar()
-                .template("    {prefix:<16} {bar:25.cyan/dim} {bytes:>10}/{total_bytes:<10} {eta:>6}")
+                .template(
+                    "    {prefix:<16} {bar:25.cyan/dim} {bytes:>10}/{total_bytes:<10} {eta:>6}",
+                )
                 .unwrap()
                 .progress_chars("━━╸");
 
@@ -262,47 +275,42 @@ async fn run(cli: Cli) -> Result<(), zb_core::Error> {
             );
         }
 
-        Commands::Uninstall { formula } => {
-            match formula {
-                Some(name) => {
-                    println!(
-                        "{} Uninstalling {}...",
-                        style("==>").cyan().bold(),
-                        style(&name).bold()
-                    );
-                    installer.uninstall(&name)?;
-                    println!(
-                        "{} Uninstalled {}",
-                        style("==>").cyan().bold(),
-                        style(&name).green()
-                    );
-                }
-                None => {
-                    let installed = installer.list_installed()?;
-                    if installed.is_empty() {
-                        println!("No formulas installed.");
-                        return Ok(());
-                    }
-
-                    println!(
-                        "{} Uninstalling {} packages...",
-                        style("==>").cyan().bold(),
-                        installed.len()
-                    );
-
-                    for keg in installed {
-                        print!("    {} {}...", style("○").dim(), keg.name);
-                        installer.uninstall(&keg.name)?;
-                        println!(" {}", style("✓").green());
-                    }
-
-                    println!(
-                        "{} Uninstalled all packages",
-                        style("==>").cyan().bold()
-                    );
-                }
+        Commands::Uninstall { formula } => match formula {
+            Some(name) => {
+                println!(
+                    "{} Uninstalling {}...",
+                    style("==>").cyan().bold(),
+                    style(&name).bold()
+                );
+                installer.uninstall(&name)?;
+                println!(
+                    "{} Uninstalled {}",
+                    style("==>").cyan().bold(),
+                    style(&name).green()
+                );
             }
-        }
+            None => {
+                let installed = installer.list_installed()?;
+                if installed.is_empty() {
+                    println!("No formulas installed.");
+                    return Ok(());
+                }
+
+                println!(
+                    "{} Uninstalling {} packages...",
+                    style("==>").cyan().bold(),
+                    installed.len()
+                );
+
+                for keg in installed {
+                    print!("    {} {}...", style("○").dim(), keg.name);
+                    installer.uninstall(&keg.name)?;
+                    println!(" {}", style("✓").green());
+                }
+
+                println!("{} Uninstalled all packages", style("==>").cyan().bold());
+            }
+        },
 
         Commands::List => {
             let installed = installer.list_installed()?;
@@ -350,6 +358,60 @@ async fn run(cli: Cli) -> Result<(), zb_core::Error> {
                     style(removed.len()).green().bold()
                 );
             }
+        }
+
+        Commands::Reset { yes } => {
+            if !cli.root.exists() {
+                println!("Nothing to reset - {} does not exist.", cli.root.display());
+                return Ok(());
+            }
+
+            if !yes {
+                println!(
+                    "{} This will delete all zerobrew data at {}",
+                    style("Warning:").yellow().bold(),
+                    style(cli.root.display()).cyan()
+                );
+                print!("Continue? [y/N] ");
+                use std::io::{self, Write};
+                io::stdout().flush().unwrap();
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).unwrap();
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            println!(
+                "{} Removing {}...",
+                style("==>").cyan().bold(),
+                cli.root.display()
+            );
+            if let Err(e) = std::fs::remove_dir_all(&cli.root) {
+                eprintln!(
+                    "{} Failed to remove {}: {}",
+                    style("error:").red().bold(),
+                    cli.root.display(),
+                    e
+                );
+                let is_permission_error = e.kind() == std::io::ErrorKind::PermissionDenied
+                    || e.to_string().to_lowercase().contains("permission");
+                if is_permission_error {
+                    eprintln!();
+                    eprintln!("      Try running with sudo:");
+                    eprintln!(
+                        "      {}",
+                        style(format!("sudo rm -rf {}", cli.root.display())).cyan()
+                    );
+                }
+                std::process::exit(1);
+            }
+            println!(
+                "{} Reset complete. Ready for cold install.",
+                style("==>").cyan().bold()
+            );
         }
     }
 

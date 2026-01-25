@@ -37,7 +37,9 @@ pub fn extract_tarball(tarball_path: &Path, dest_dir: &Path) -> Result<(), Error
 
         // Ensure the entry doesn't escape the destination directory
         let full_path = dest_dir.join(&*entry_path);
-        let canonical_dest = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+        let canonical_dest = dest_dir
+            .canonicalize()
+            .unwrap_or_else(|_| dest_dir.to_path_buf());
         if let Ok(canonical_full) = full_path.canonicalize()
             && !canonical_full.starts_with(&canonical_dest)
         {
@@ -46,9 +48,11 @@ pub fn extract_tarball(tarball_path: &Path, dest_dir: &Path) -> Result<(), Error
             });
         }
 
-        entry.unpack_in(dest_dir).map_err(|e| Error::StoreCorruption {
-            message: format!("failed to unpack entry {path_display}: {e}"),
-        })?;
+        entry
+            .unpack_in(dest_dir)
+            .map_err(|e| Error::StoreCorruption {
+                message: format!("failed to unpack entry {path_display}: {e}"),
+            })?;
     }
 
     Ok(())
@@ -96,9 +100,11 @@ pub fn extract_tarball_from_reader<R: Read>(reader: R, dest_dir: &Path) -> Resul
 
         let path_display = entry_path.display().to_string();
 
-        entry.unpack_in(dest_dir).map_err(|e| Error::StoreCorruption {
-            message: format!("failed to unpack entry {path_display}: {e}"),
-        })?;
+        entry
+            .unpack_in(dest_dir)
+            .map_err(|e| Error::StoreCorruption {
+                message: format!("failed to unpack entry {path_display}: {e}"),
+            })?;
     }
 
     Ok(())
@@ -107,8 +113,8 @@ pub fn extract_tarball_from_reader<R: Read>(reader: R, dest_dir: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::fs;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -186,7 +192,11 @@ mod tests {
 
         let metadata = fs::metadata(dest.join("script.sh")).unwrap();
         let mode = metadata.permissions().mode();
-        assert!(mode & 0o111 != 0, "executable bit not preserved: {:o}", mode);
+        assert!(
+            mode & 0o111 != 0,
+            "executable bit not preserved: {:o}",
+            mode
+        );
     }
 
     #[test]
@@ -203,11 +213,13 @@ mod tests {
         extract_tarball(&tarball_path, &dest).unwrap();
 
         let link_path = dest.join("link");
-        assert!(link_path
-            .symlink_metadata()
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            link_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(
             fs::read_link(&link_path).unwrap(),
             PathBuf::from("target.txt")

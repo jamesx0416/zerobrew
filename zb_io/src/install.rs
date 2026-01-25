@@ -11,7 +11,7 @@ use crate::materialize::Cellar;
 use crate::progress::{InstallProgress, ProgressCallback};
 use crate::store::Store;
 
-use zb_core::{resolve_closure, select_bottle, Error, Formula, SelectedBottle};
+use zb_core::{Error, Formula, SelectedBottle, resolve_closure, select_bottle};
 
 pub struct Installer {
     api_client: ApiClient,
@@ -210,7 +210,9 @@ impl Installer {
         });
 
         // Use streaming downloads - process each as it completes
-        let mut rx = self.downloader.download_streaming(requests, download_progress);
+        let mut rx = self
+            .downloader
+            .download_streaming(requests, download_progress);
 
         // Track results by index to maintain install order for database records
         let total = to_install.len();
@@ -229,16 +231,21 @@ impl Installer {
                     });
 
                     // Extract to store (if not already extracted)
-                    let store_entry = match self.store.ensure_entry(&bottle.sha256, &download.blob_path) {
-                        Ok(entry) => entry,
-                        Err(e) => {
-                            error = Some(e);
-                            continue;
-                        }
-                    };
+                    let store_entry =
+                        match self.store.ensure_entry(&bottle.sha256, &download.blob_path) {
+                            Ok(entry) => entry,
+                            Err(e) => {
+                                error = Some(e);
+                                continue;
+                            }
+                        };
 
                     // Materialize to cellar
-                    let keg_path = match self.cellar.materialize(&formula.name, &formula.versions.stable, &store_entry) {
+                    let keg_path = match self.cellar.materialize(
+                        &formula.name,
+                        &formula.versions.stable,
+                        &store_entry,
+                    ) {
                         Ok(path) => path,
                         Err(e) => {
                             error = Some(e);
@@ -380,7 +387,28 @@ pub fn create_installer(
 ) -> Result<Installer, Error> {
     use std::fs;
 
-    // Ensure all directories exist
+    // First ensure the root directory exists
+    if !root.exists() {
+        fs::create_dir_all(root).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                Error::StoreCorruption {
+                    message: format!(
+                        "cannot create root directory '{}': permission denied.\n\n\
+                        Create it with:\n  sudo mkdir -p {} && sudo chown $USER {}",
+                        root.display(),
+                        root.display(),
+                        root.display()
+                    ),
+                }
+            } else {
+                Error::StoreCorruption {
+                    message: format!("failed to create root directory '{}': {e}", root.display()),
+                }
+            }
+        })?;
+    }
+
+    // Ensure all subdirectories exist
     fs::create_dir_all(root.join("db")).map_err(|e| Error::StoreCorruption {
         message: format!("failed to create db directory: {e}"),
     })?;
@@ -422,8 +450,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn create_bottle_tarball(formula_name: &str) -> Vec<u8> {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use std::io::Write;
         use tar::Builder;
 
@@ -511,7 +539,8 @@ mod tests {
         let linker = Linker::new(&prefix).unwrap();
         let db = Database::open(&root.join("db/zb.sqlite3")).unwrap();
 
-        let mut installer = Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
+        let mut installer =
+            Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
 
         // Install
         installer.install("testpkg", true).await.unwrap();
@@ -566,7 +595,9 @@ mod tests {
             .await;
 
         Mock::given(method("GET"))
-            .and(path("/bottles/uninstallme-1.0.0.arm64_sonoma.bottle.tar.gz"))
+            .and(path(
+                "/bottles/uninstallme-1.0.0.arm64_sonoma.bottle.tar.gz",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(bottle.clone()))
             .mount(&mock_server)
             .await;
@@ -583,7 +614,8 @@ mod tests {
         let linker = Linker::new(&prefix).unwrap();
         let db = Database::open(&root.join("db/zb.sqlite3")).unwrap();
 
-        let mut installer = Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
+        let mut installer =
+            Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
 
         // Install
         installer.install("uninstallme", true).await.unwrap();
@@ -657,7 +689,8 @@ mod tests {
         let linker = Linker::new(&prefix).unwrap();
         let db = Database::open(&root.join("db/zb.sqlite3")).unwrap();
 
-        let mut installer = Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
+        let mut installer =
+            Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
 
         // Install and uninstall
         installer.install("gctest", true).await.unwrap();
@@ -734,7 +767,8 @@ mod tests {
         let linker = Linker::new(&prefix).unwrap();
         let db = Database::open(&root.join("db/zb.sqlite3")).unwrap();
 
-        let mut installer = Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
+        let mut installer =
+            Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
 
         // Install but don't uninstall
         installer.install("keepme", true).await.unwrap();
@@ -840,7 +874,8 @@ mod tests {
         let linker = Linker::new(&prefix).unwrap();
         let db = Database::open(&root.join("db/zb.sqlite3")).unwrap();
 
-        let mut installer = Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
+        let mut installer =
+            Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
 
         // Install main package (should also install dependency)
         installer.install("mainpkg", true).await.unwrap();
@@ -874,34 +909,51 @@ mod tests {
         // Formula JSONs
         let leaf1_json = format!(
             r#"{{"name":"leaf1","versions":{{"stable":"1.0.0"}},"dependencies":[],"bottle":{{"stable":{{"files":{{"arm64_sonoma":{{"url":"{}/bottles/leaf1.tar.gz","sha256":"{}"}}}}}}}}}}"#,
-            mock_server.uri(), leaf1_sha
+            mock_server.uri(),
+            leaf1_sha
         );
         let leaf2_json = format!(
             r#"{{"name":"leaf2","versions":{{"stable":"1.0.0"}},"dependencies":[],"bottle":{{"stable":{{"files":{{"arm64_sonoma":{{"url":"{}/bottles/leaf2.tar.gz","sha256":"{}"}}}}}}}}}}"#,
-            mock_server.uri(), leaf2_sha
+            mock_server.uri(),
+            leaf2_sha
         );
         let mid1_json = format!(
             r#"{{"name":"mid1","versions":{{"stable":"1.0.0"}},"dependencies":["leaf1"],"bottle":{{"stable":{{"files":{{"arm64_sonoma":{{"url":"{}/bottles/mid1.tar.gz","sha256":"{}"}}}}}}}}}}"#,
-            mock_server.uri(), mid1_sha
+            mock_server.uri(),
+            mid1_sha
         );
         let mid2_json = format!(
             r#"{{"name":"mid2","versions":{{"stable":"1.0.0"}},"dependencies":["leaf1","leaf2"],"bottle":{{"stable":{{"files":{{"arm64_sonoma":{{"url":"{}/bottles/mid2.tar.gz","sha256":"{}"}}}}}}}}}}"#,
-            mock_server.uri(), mid2_sha
+            mock_server.uri(),
+            mid2_sha
         );
         let root_json = format!(
             r#"{{"name":"root","versions":{{"stable":"1.0.0"}},"dependencies":["mid1","mid2"],"bottle":{{"stable":{{"files":{{"arm64_sonoma":{{"url":"{}/bottles/root.tar.gz","sha256":"{}"}}}}}}}}}}"#,
-            mock_server.uri(), root_sha
+            mock_server.uri(),
+            root_sha
         );
 
         // Mount all mocks
-        for (name, json) in [("leaf1", &leaf1_json), ("leaf2", &leaf2_json), ("mid1", &mid1_json), ("mid2", &mid2_json), ("root", &root_json)] {
+        for (name, json) in [
+            ("leaf1", &leaf1_json),
+            ("leaf2", &leaf2_json),
+            ("mid1", &mid1_json),
+            ("mid2", &mid2_json),
+            ("root", &root_json),
+        ] {
             Mock::given(method("GET"))
                 .and(path(format!("/{}.json", name)))
                 .respond_with(ResponseTemplate::new(200).set_body_string(json))
                 .mount(&mock_server)
                 .await;
         }
-        for (name, bottle) in [("leaf1", &leaf1_bottle), ("leaf2", &leaf2_bottle), ("mid1", &mid1_bottle), ("mid2", &mid2_bottle), ("root", &root_bottle)] {
+        for (name, bottle) in [
+            ("leaf1", &leaf1_bottle),
+            ("leaf2", &leaf2_bottle),
+            ("mid1", &mid1_bottle),
+            ("mid2", &mid2_bottle),
+            ("root", &root_bottle),
+        ] {
             Mock::given(method("GET"))
                 .and(path(format!("/bottles/{}.tar.gz", name)))
                 .respond_with(ResponseTemplate::new(200).set_body_bytes(bottle.clone()))
@@ -920,7 +972,8 @@ mod tests {
         let linker = Linker::new(&prefix).unwrap();
         let db = Database::open(&root.join("db/zb.sqlite3")).unwrap();
 
-        let mut installer = Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
+        let mut installer =
+            Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
 
         // Install root (should install all 5 packages)
         installer.install("root", true).await.unwrap();
@@ -951,13 +1004,15 @@ mod tests {
         // Fast package formula
         let fast_json = format!(
             r#"{{"name":"fastpkg","versions":{{"stable":"1.0.0"}},"dependencies":[],"bottle":{{"stable":{{"files":{{"arm64_sonoma":{{"url":"{}/bottles/fast.tar.gz","sha256":"{}"}}}}}}}}}}"#,
-            mock_server.uri(), fast_sha
+            mock_server.uri(),
+            fast_sha
         );
 
         // Slow package formula (depends on fast)
         let slow_json = format!(
             r#"{{"name":"slowpkg","versions":{{"stable":"1.0.0"}},"dependencies":["fastpkg"],"bottle":{{"stable":{{"files":{{"arm64_sonoma":{{"url":"{}/bottles/slow.tar.gz","sha256":"{}"}}}}}}}}}}"#,
-            mock_server.uri(), slow_sha
+            mock_server.uri(),
+            slow_sha
         );
 
         // Mount API mocks
@@ -986,7 +1041,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_bytes(slow_bottle.clone())
-                    .set_delay(Duration::from_millis(100))
+                    .set_delay(Duration::from_millis(100)),
             )
             .mount(&mock_server)
             .await;
@@ -1002,7 +1057,8 @@ mod tests {
         let linker = Linker::new(&prefix).unwrap();
         let db = Database::open(&root.join("db/zb.sqlite3")).unwrap();
 
-        let mut installer = Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
+        let mut installer =
+            Installer::new(api_client, blob_cache, store, cellar, linker, db, 4, None);
 
         // Install slow package (which depends on fast)
         // With streaming, fast should be extracted while slow is still downloading

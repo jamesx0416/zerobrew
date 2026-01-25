@@ -5,18 +5,52 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderValue, WWW_AUTHENTICATE};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 
 use crate::blob::BlobCache;
 use crate::progress::InstallProgress;
 use zb_core::Error;
 
+/// Number of parallel connections to race when downloading (hits different CDN edges)
+const RACING_CONNECTIONS: usize = 4;
+
+/// Delay between starting each racing connection (ms)
+const RACING_STAGGER_MS: u64 = 200;
+
 /// Callback for download progress updates
 pub type DownloadProgressCallback = Arc<dyn Fn(InstallProgress) + Send + Sync>;
+
+/// Get alternate URLs for a given primary URL (from user-configured mirrors)
+fn get_alternate_urls(primary_url: &str) -> Vec<String> {
+    let mut alternates = Vec::new();
+
+    // Check for user-configured mirrors via environment variable (comma-separated)
+    if let Ok(mirrors) = std::env::var("HOMEBREW_BOTTLE_MIRRORS") {
+        for mirror in mirrors.split(',') {
+            let mirror = mirror.trim();
+            if !mirror.is_empty() {
+                if let Some(alt) = transform_url_to_mirror(primary_url, mirror) {
+                    alternates.push(alt);
+                }
+            }
+        }
+    }
+
+    alternates
+}
+
+/// Transform a URL to use a custom mirror domain
+fn transform_url_to_mirror(url: &str, mirror_domain: &str) -> Option<String> {
+    if url.contains("ghcr.io") {
+        Some(url.replace("ghcr.io", mirror_domain))
+    } else {
+        None
+    }
+}
 
 #[derive(Deserialize)]
 struct TokenResponse {
@@ -63,7 +97,8 @@ impl Downloader {
     }
 
     pub async fn download(&self, url: &str, expected_sha256: &str) -> Result<PathBuf, Error> {
-        self.download_with_progress(url, expected_sha256, None, None).await
+        self.download_with_progress(url, expected_sha256, None, None)
+            .await
     }
 
     pub async fn download_with_progress(
@@ -84,222 +119,353 @@ impl Downloader {
             return Ok(self.blob_cache.blob_path(expected_sha256));
         }
 
-        // Try with cached token first (for GHCR URLs)
-        let cached_token = self.get_cached_token_for_url(url).await;
+        // Get alternate mirror URLs (user-configured)
+        let alternates = get_alternate_urls(url);
 
-        let mut request = self.client.get(url);
-        if let Some(token) = &cached_token {
-            request = request.header(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}")).unwrap());
-        }
-
-        let response = request.send().await.map_err(|e| Error::NetworkFailure {
-            message: e.to_string(),
-        })?;
-
-        let response = if response.status() == StatusCode::UNAUTHORIZED {
-            self.handle_auth_challenge(url, response).await?
-        } else {
-            response
-        };
-
-        if !response.status().is_success() {
-            return Err(Error::NetworkFailure {
-                message: format!("HTTP {}", response.status()),
-            });
-        }
-
-        self.download_response_with_progress(response, expected_sha256, name, progress).await
-    }
-
-    /// Try to get a cached token that might work for this URL
-    async fn get_cached_token_for_url(&self, url: &str) -> Option<String> {
-        // Extract scope pattern from URL (e.g., ghcr.io/v2/homebrew/core/*)
-        let scope_prefix = extract_scope_prefix(url)?;
-
-        let cache = self.token_cache.read().await;
-        let now = Instant::now();
-
-        // Find any non-expired token with matching scope prefix
-        for (scope, cached) in cache.iter() {
-            if scope.starts_with(&scope_prefix) && cached.expires_at > now {
-                return Some(cached.token.clone());
-            }
-        }
-        None
-    }
-
-    async fn handle_auth_challenge(
-        &self,
-        url: &str,
-        response: reqwest::Response,
-    ) -> Result<reqwest::Response, Error> {
-        let www_auth_header = response.headers().get(WWW_AUTHENTICATE);
-
-        let www_auth = match www_auth_header {
-            Some(value) => value.to_str().map_err(|_| Error::NetworkFailure {
-                message: "WWW-Authenticate header contains invalid characters".to_string(),
-            })?,
-            None => {
-                return Err(Error::NetworkFailure {
-                    message: "server returned 401 without WWW-Authenticate header (may be rate limited)".to_string(),
-                });
-            }
-        };
-
-        let token = self.fetch_bearer_token(www_auth).await?;
-
-        let response = self
-            .client
-            .get(url)
-            .header(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
-            )
-            .send()
+        // Always use racing to hit different CDN edges for faster downloads
+        self.download_with_racing(url, &alternates, expected_sha256, name, progress)
             .await
-            .map_err(|e| Error::NetworkFailure {
-                message: e.to_string(),
-            })?;
-
-        // If we still get 401 after providing a token, give a clearer error
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(Error::NetworkFailure {
-                message: "authentication failed: token was rejected by server".to_string(),
-            });
-        }
-
-        Ok(response)
     }
 
-    async fn fetch_bearer_token(&self, www_authenticate: &str) -> Result<String, Error> {
-        let (realm, service, scope) = parse_www_authenticate(www_authenticate)?;
-
-        // Check cache first
-        {
-            let cache = self.token_cache.read().await;
-            if let Some(cached) = cache.get(&scope) {
-                if cached.expires_at > Instant::now() {
-                    return Ok(cached.token.clone());
-                }
-            }
-        }
-
-        // Use reqwest's query builder for proper URL encoding
-        let token_url = reqwest::Url::parse_with_params(
-            &realm,
-            &[("service", &service), ("scope", &scope)],
-        )
-        .map_err(|e| Error::NetworkFailure {
-            message: format!("failed to construct token URL: {e}"),
-        })?;
-
-        let response = self
-            .client
-            .get(token_url)
-            .send()
-            .await
-            .map_err(|e| Error::NetworkFailure {
-                message: format!("token request failed: {e}"),
-            })?;
-
-        if !response.status().is_success() {
-            return Err(Error::NetworkFailure {
-                message: format!("token request returned HTTP {}", response.status()),
-            });
-        }
-
-        let token_response: TokenResponse = response.json().await.map_err(|e| Error::NetworkFailure {
-            message: format!("failed to parse token response: {e}"),
-        })?;
-
-        // Cache the token (GHCR tokens typically expire in 5 minutes, use 4 min to be safe)
-        {
-            let mut cache = self.token_cache.write().await;
-            cache.insert(
-                scope,
-                CachedToken {
-                    token: token_response.token.clone(),
-                    expires_at: Instant::now() + Duration::from_secs(240),
-                },
-            );
-        }
-
-        Ok(token_response.token)
-    }
-
-    async fn download_response_with_progress(
+    /// Download with racing: start multiple parallel connections to the same URL
+    /// (hits different CDN edges) and optionally alternate mirrors.
+    /// First successful download wins, others are cancelled.
+    async fn download_with_racing(
         &self,
-        response: reqwest::Response,
+        primary_url: &str,
+        alternate_urls: &[String],
         expected_sha256: &str,
         name: Option<String>,
         progress: Option<DownloadProgressCallback>,
     ) -> Result<PathBuf, Error> {
-        // Get content length for progress tracking
-        let total_bytes = response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok());
+        use tokio::sync::oneshot;
 
-        // Report download started
-        if let (Some(cb), Some(n)) = (&progress, &name) {
-            cb(InstallProgress::DownloadStarted {
-                name: n.clone(),
-                total_bytes,
-            });
+        // Create a channel to signal completion
+        let (done_tx, _done_rx) = oneshot::channel::<()>();
+        let done_tx = Arc::new(Mutex::new(Some(done_tx)));
+
+        // Build list of URLs to race:
+        // - Multiple connections to primary URL (hits different CDN edges)
+        // - Plus any configured alternate mirrors
+        let mut all_urls: Vec<String> = Vec::new();
+
+        // Add primary URL multiple times for CDN edge racing
+        for _ in 0..RACING_CONNECTIONS {
+            all_urls.push(primary_url.to_string());
         }
 
-        let mut writer = self
-            .blob_cache
+        // Add alternate mirrors
+        all_urls.extend(alternate_urls.iter().cloned());
+
+        // Spawn racing downloads
+        let mut handles = Vec::new();
+        for (idx, url) in all_urls.into_iter().enumerate() {
+            let downloader_client = self.client.clone();
+            let blob_cache = self.blob_cache.clone();
+            let token_cache = self.token_cache.clone();
+            let expected_sha256 = expected_sha256.to_string();
+            let name = name.clone();
+            // Only first connection reports progress to avoid duplicate updates
+            let progress = if idx == 0 { progress.clone() } else { None };
+            let done_tx = done_tx.clone();
+
+            // Stagger starts to give earlier connections a head start
+            let delay = Duration::from_millis(idx as u64 * RACING_STAGGER_MS);
+
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+
+                // Check if another download already finished
+                {
+                    let guard = done_tx.lock().await;
+                    if guard.is_none() {
+                        return Err(Error::NetworkFailure {
+                            message: "cancelled: another download finished first".to_string(),
+                        });
+                    }
+                }
+
+                let result = download_single_internal(
+                    &downloader_client,
+                    &blob_cache,
+                    &token_cache,
+                    &url,
+                    &expected_sha256,
+                    name,
+                    progress,
+                )
+                .await;
+
+                // Signal completion if successful
+                if result.is_ok() {
+                    let mut guard = done_tx.lock().await;
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
+                }
+
+                result
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for first successful result
+        let mut last_error = None;
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(path)) => return Ok(path),
+                Ok(Err(e)) => last_error = Some(e),
+                Err(e) => {
+                    last_error = Some(Error::NetworkFailure {
+                        message: format!("task join error: {e}"),
+                    })
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| Error::NetworkFailure {
+            message: "all download attempts failed".to_string(),
+        }))
+    }
+}
+
+/// Internal download function that can be called from racing context
+async fn download_single_internal(
+    client: &reqwest::Client,
+    blob_cache: &BlobCache,
+    token_cache: &TokenCache,
+    url: &str,
+    expected_sha256: &str,
+    name: Option<String>,
+    progress: Option<DownloadProgressCallback>,
+) -> Result<PathBuf, Error> {
+    // Check cache first
+    if blob_cache.has_blob(expected_sha256) {
+        if let (Some(cb), Some(n)) = (&progress, &name) {
+            cb(InstallProgress::DownloadCompleted {
+                name: n.clone(),
+                total_bytes: 0,
+            });
+        }
+        return Ok(blob_cache.blob_path(expected_sha256));
+    }
+
+    // Try with cached token first (for GHCR URLs)
+    let cached_token = get_cached_token_for_url_internal(token_cache, url).await;
+
+    let mut request = client.get(url);
+    if let Some(token) = &cached_token {
+        request = request.header(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+    }
+
+    let response = request.send().await.map_err(|e| Error::NetworkFailure {
+        message: e.to_string(),
+    })?;
+
+    let response = if response.status() == StatusCode::UNAUTHORIZED {
+        handle_auth_challenge_internal(client, token_cache, url, response).await?
+    } else {
+        response
+    };
+
+    if !response.status().is_success() {
+        return Err(Error::NetworkFailure {
+            message: format!("HTTP {}", response.status()),
+        });
+    }
+
+    download_response_internal(blob_cache, response, expected_sha256, name, progress).await
+}
+
+async fn get_cached_token_for_url_internal(token_cache: &TokenCache, url: &str) -> Option<String> {
+    let scope_prefix = extract_scope_prefix(url)?;
+    let cache = token_cache.read().await;
+    let now = Instant::now();
+
+    for (scope, cached) in cache.iter() {
+        if scope.starts_with(&scope_prefix) && cached.expires_at > now {
+            return Some(cached.token.clone());
+        }
+    }
+    None
+}
+
+async fn handle_auth_challenge_internal(
+    client: &reqwest::Client,
+    token_cache: &TokenCache,
+    url: &str,
+    response: reqwest::Response,
+) -> Result<reqwest::Response, Error> {
+    let www_auth_header = response.headers().get(WWW_AUTHENTICATE);
+
+    let www_auth = match www_auth_header {
+        Some(value) => value.to_str().map_err(|_| Error::NetworkFailure {
+            message: "WWW-Authenticate header contains invalid characters".to_string(),
+        })?,
+        None => {
+            return Err(Error::NetworkFailure {
+                message:
+                    "server returned 401 without WWW-Authenticate header (may be rate limited)"
+                        .to_string(),
+            });
+        }
+    };
+
+    let token = fetch_bearer_token_internal(client, token_cache, www_auth).await?;
+
+    let response = client
+        .get(url)
+        .header(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .send()
+        .await
+        .map_err(|e| Error::NetworkFailure {
+            message: e.to_string(),
+        })?;
+
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return Err(Error::NetworkFailure {
+            message: "authentication failed: token was rejected by server".to_string(),
+        });
+    }
+
+    Ok(response)
+}
+
+async fn fetch_bearer_token_internal(
+    client: &reqwest::Client,
+    token_cache: &TokenCache,
+    www_authenticate: &str,
+) -> Result<String, Error> {
+    let (realm, service, scope) = parse_www_authenticate(www_authenticate)?;
+
+    // Check cache first
+    {
+        let cache = token_cache.read().await;
+        if let Some(cached) = cache.get(&scope) {
+            if cached.expires_at > Instant::now() {
+                return Ok(cached.token.clone());
+            }
+        }
+    }
+
+    let token_url =
+        reqwest::Url::parse_with_params(&realm, &[("service", &service), ("scope", &scope)])
+            .map_err(|e| Error::NetworkFailure {
+                message: format!("failed to construct token URL: {e}"),
+            })?;
+
+    // Anonymous token request (homebrew bottles are public)
+    let response = client
+        .get(token_url)
+        .send()
+        .await
+        .map_err(|e| Error::NetworkFailure {
+            message: format!("token request failed: {e}"),
+        })?;
+
+    if !response.status().is_success() {
+        return Err(Error::NetworkFailure {
+            message: format!("token request returned HTTP {}", response.status()),
+        });
+    }
+
+    let token_response: TokenResponse =
+        response.json().await.map_err(|e| Error::NetworkFailure {
+            message: format!("failed to parse token response: {e}"),
+        })?;
+
+    // Cache the token
+    {
+        let mut cache = token_cache.write().await;
+        cache.insert(
+            scope,
+            CachedToken {
+                token: token_response.token.clone(),
+                expires_at: Instant::now() + Duration::from_secs(240),
+            },
+        );
+    }
+
+    Ok(token_response.token)
+}
+
+async fn download_response_internal(
+    blob_cache: &BlobCache,
+    response: reqwest::Response,
+    expected_sha256: &str,
+    name: Option<String>,
+    progress: Option<DownloadProgressCallback>,
+) -> Result<PathBuf, Error> {
+    let total_bytes = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    if let (Some(cb), Some(n)) = (&progress, &name) {
+        cb(InstallProgress::DownloadStarted {
+            name: n.clone(),
+            total_bytes,
+        });
+    }
+
+    let mut writer =
+        blob_cache
             .start_write(expected_sha256)
             .map_err(|e| Error::NetworkFailure {
                 message: format!("failed to create blob writer: {e}"),
             })?;
 
-        let mut hasher = Sha256::new();
-        let mut stream = response.bytes_stream();
-        let mut downloaded: u64 = 0;
+    let mut hasher = Sha256::new();
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| Error::NetworkFailure {
-                message: format!("failed to read chunk: {e}"),
-            })?;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::NetworkFailure {
+            message: format!("failed to read chunk: {e}"),
+        })?;
 
-            downloaded += chunk.len() as u64;
-            hasher.update(&chunk);
-            writer.write_all(&chunk).map_err(|e| Error::NetworkFailure {
+        downloaded += chunk.len() as u64;
+        hasher.update(&chunk);
+        writer
+            .write_all(&chunk)
+            .map_err(|e| Error::NetworkFailure {
                 message: format!("failed to write chunk: {e}"),
             })?;
 
-            // Report progress
-            if let (Some(cb), Some(n)) = (&progress, &name) {
-                cb(InstallProgress::DownloadProgress {
-                    name: n.clone(),
-                    downloaded,
-                    total_bytes,
-                });
-            }
-        }
-
-        let actual_hash = format!("{:x}", hasher.finalize());
-
-        if actual_hash != expected_sha256 {
-            return Err(Error::ChecksumMismatch {
-                expected: expected_sha256.to_string(),
-                actual: actual_hash,
-            });
-        }
-
-        // Report download completed
         if let (Some(cb), Some(n)) = (&progress, &name) {
-            cb(InstallProgress::DownloadCompleted {
+            cb(InstallProgress::DownloadProgress {
                 name: n.clone(),
-                total_bytes: downloaded,
+                downloaded,
+                total_bytes,
             });
         }
-
-        writer.commit()
     }
+
+    let actual_hash = format!("{:x}", hasher.finalize());
+
+    if actual_hash != expected_sha256 {
+        return Err(Error::ChecksumMismatch {
+            expected: expected_sha256.to_string(),
+            actual: actual_hash,
+        });
+    }
+
+    if let (Some(cb), Some(n)) = (&progress, &name) {
+        cb(InstallProgress::DownloadCompleted {
+            name: n.clone(),
+            total_bytes: downloaded,
+        });
+    }
+
+    writer.commit()
 }
 
 /// Extract scope prefix from a GHCR URL for token cache matching.
@@ -316,9 +482,11 @@ fn extract_scope_prefix(url: &str) -> Option<String> {
 }
 
 fn parse_www_authenticate(header: &str) -> Result<(String, String, String), Error> {
-    let header = header.strip_prefix("Bearer ").ok_or_else(|| Error::NetworkFailure {
-        message: "unsupported auth scheme".to_string(),
-    })?;
+    let header = header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| Error::NetworkFailure {
+            message: "unsupported auth scheme".to_string(),
+        })?;
 
     let mut realm = None;
     let mut service = None;
@@ -430,7 +598,8 @@ impl ParallelDownloader {
             let sha256 = req.sha256.clone();
 
             tokio::spawn(async move {
-                let result = Self::download_with_dedup(downloader, semaphore, inflight, req, progress).await;
+                let result =
+                    Self::download_with_dedup(downloader, semaphore, inflight, req, progress).await;
                 let _ = tx
                     .send(result.map(|blob_path| DownloadResult {
                         name,
@@ -477,9 +646,12 @@ impl ParallelDownloader {
         }
 
         // We're the first request for this sha256, do the actual download
-        let _permit = semaphore.acquire().await.map_err(|e| Error::NetworkFailure {
-            message: format!("semaphore error: {e}"),
-        })?;
+        let _permit = semaphore
+            .acquire()
+            .await
+            .map_err(|e| Error::NetworkFailure {
+                message: format!("semaphore error: {e}"),
+            })?;
 
         let result = downloader
             .download_with_progress(&req.url, &req.sha256, Some(req.name), progress)
@@ -558,10 +730,16 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, Error::ChecksumMismatch { .. }));
 
-        let blob_path = tmp.path().join("blobs").join(format!("{wrong_sha256}.tar.gz"));
+        let blob_path = tmp
+            .path()
+            .join("blobs")
+            .join(format!("{wrong_sha256}.tar.gz"));
         assert!(!blob_path.exists());
 
-        let tmp_path = tmp.path().join("tmp").join(format!("{wrong_sha256}.tar.gz.part"));
+        let tmp_path = tmp
+            .path()
+            .join("tmp")
+            .join(format!("{wrong_sha256}.tar.gz.part"));
         assert!(!tmp_path.exists());
     }
 
@@ -635,7 +813,10 @@ mod tests {
         let _ = downloader.download_all(requests).await;
 
         let peak = max_concurrent.load(Ordering::SeqCst);
-        assert!(peak <= 2, "peak concurrent downloads was {peak}, expected <= 2");
+        assert!(
+            peak <= 2,
+            "peak concurrent downloads was {peak}, expected <= 2"
+        );
     }
 
     #[tokio::test]

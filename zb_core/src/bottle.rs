@@ -9,7 +9,12 @@ pub struct SelectedBottle {
 
 pub fn select_bottle(formula: &Formula) -> Result<SelectedBottle, Error> {
     // Prefer macOS ARM bottles in order of preference (newest first)
-    let macos_tags = ["arm64_tahoe", "arm64_sequoia", "arm64_sonoma", "arm64_ventura"];
+    let macos_tags = [
+        "arm64_tahoe",
+        "arm64_sequoia",
+        "arm64_sonoma",
+        "arm64_ventura",
+    ];
 
     for preferred_tag in macos_tags {
         if let Some(file) = formula.bottle.stable.files.get(preferred_tag) {
@@ -75,7 +80,8 @@ mod tests {
         files.insert(
             "all".to_string(),
             BottleFile {
-                url: "https://ghcr.io/v2/homebrew/core/ca-certificates/blobs/sha256:abc123".to_string(),
+                url: "https://ghcr.io/v2/homebrew/core/ca-certificates/blobs/sha256:abc123"
+                    .to_string(),
                 sha256: "abc123".to_string(),
             },
         );

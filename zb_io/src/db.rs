@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
 
 use zb_core::Error;
 
@@ -69,9 +69,12 @@ impl Database {
     }
 
     pub fn transaction(&mut self) -> Result<InstallTransaction<'_>, Error> {
-        let tx = self.conn.transaction().map_err(|e| Error::StoreCorruption {
-            message: format!("failed to start transaction: {e}"),
-        })?;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| Error::StoreCorruption {
+                message: format!("failed to start transaction: {e}"),
+            })?;
 
         Ok(InstallTransaction { tx })
     }
@@ -96,7 +99,9 @@ impl Database {
     pub fn list_installed(&self) -> Result<Vec<InstalledKeg>, Error> {
         let mut stmt = self
             .conn
-            .prepare("SELECT name, version, store_key, installed_at FROM installed_kegs ORDER BY name")
+            .prepare(
+                "SELECT name, version, store_key, installed_at FROM installed_kegs ORDER BY name",
+            )
             .map_err(|e| Error::StoreCorruption {
                 message: format!("failed to prepare statement: {e}"),
             })?;
@@ -158,12 +163,7 @@ pub struct InstallTransaction<'a> {
 }
 
 impl<'a> InstallTransaction<'a> {
-    pub fn record_install(
-        &self,
-        name: &str,
-        version: &str,
-        store_key: &str,
-    ) -> Result<(), Error> {
+    pub fn record_install(&self, name: &str, version: &str, store_key: &str) -> Result<(), Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -356,8 +356,13 @@ mod tests {
         {
             let tx = db.transaction().unwrap();
             tx.record_install("foo", "1.0.0", "abc123").unwrap();
-            tx.record_linked_file("foo", "1.0.0", "/opt/homebrew/bin/foo", "/opt/zerobrew/cellar/foo/1.0.0/bin/foo")
-                .unwrap();
+            tx.record_linked_file(
+                "foo",
+                "1.0.0",
+                "/opt/homebrew/bin/foo",
+                "/opt/zerobrew/cellar/foo/1.0.0/bin/foo",
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 

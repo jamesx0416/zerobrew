@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use zb_core::Error;
 
+#[derive(Clone)]
 pub struct BlobCache {
     blobs_dir: PathBuf,
     tmp_dir: PathBuf,

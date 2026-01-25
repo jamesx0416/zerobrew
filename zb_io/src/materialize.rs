@@ -129,9 +129,7 @@ fn patch_homebrew_placeholders(keg_path: &Path, cellar_dir: &Path) -> Result<(),
     use std::process::Command;
 
     // Derive prefix from cellar (cellar_dir is typically prefix/Cellar)
-    let prefix = cellar_dir
-        .parent()
-        .unwrap_or(Path::new("/opt/homebrew"));
+    let prefix = cellar_dir.parent().unwrap_or(Path::new("/opt/homebrew"));
 
     let cellar_str = cellar_dir.to_string_lossy().to_string();
     let prefix_str = prefix.to_string_lossy().to_string();
@@ -333,7 +331,7 @@ fn try_clonefile_dir(src: &Path, dst: &Path) -> io::Result<()> {
 
     unsafe extern "C" {
         fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32)
-            -> libc::c_int;
+        -> libc::c_int;
     }
 
     let result = unsafe { clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), CLONE_NOFOLLOW) };
@@ -396,10 +394,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path, try_hardlink: bool) -> Result<(), 
                 let metadata = fs::metadata(&src_path).map_err(|e| Error::StoreCorruption {
                     message: format!("failed to read metadata: {e}"),
                 })?;
-                fs::set_permissions(&dst_path, metadata.permissions())
-                    .map_err(|e| Error::StoreCorruption {
+                fs::set_permissions(&dst_path, metadata.permissions()).map_err(|e| {
+                    Error::StoreCorruption {
                         message: format!("failed to set permissions: {e}"),
-                    })?;
+                    }
+                })?;
             }
         }
     }
@@ -474,11 +473,13 @@ mod tests {
 
         // Check symlink preserved
         let link_path = keg_path.join("lib/libfoo.1.dylib");
-        assert!(link_path
-            .symlink_metadata()
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            link_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(
             fs::read_link(&link_path).unwrap(),
             PathBuf::from("libfoo.dylib")

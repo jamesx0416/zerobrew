@@ -2,9 +2,16 @@
 #[derive(Debug, Clone)]
 pub enum InstallProgress {
     /// Starting to download a package (with total size if known)
-    DownloadStarted { name: String, total_bytes: Option<u64> },
+    DownloadStarted {
+        name: String,
+        total_bytes: Option<u64>,
+    },
     /// Download progress update
-    DownloadProgress { name: String, downloaded: u64, total_bytes: Option<u64> },
+    DownloadProgress {
+        name: String,
+        downloaded: u64,
+        total_bytes: Option<u64>,
+    },
     /// Download completed for a package
     DownloadCompleted { name: String, total_bytes: u64 },
     /// Starting to unpack/materialize a package
